@@ -10,6 +10,9 @@ function App() {
   const [username, setUsername] = useState('')
   const [roomIdInput, setRoomIdInput] = useState('')
   const [usernameInput, setUsernameInput] = useState('')
+  const [loginMode, setLoginMode] = useState(null) // null | 'create' | 'join'
+  const [generatedCode, setGeneratedCode] = useState('')
+  const [codeCopied, setCodeCopied] = useState(false)
 
   const [users, setUsers] = useState([])
   const [messages, setMessages] = useState([])
@@ -592,42 +595,142 @@ function App() {
   const showScreenAsMain = mainView === 'screen' && hasScreenSource
   const showPartnerAsMain = !showScreenAsMain && hasPartnerSource
 
+  const generateRoomCode = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    let code = ''
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)]
+    return code
+  }
+
+  const handleCreateRoom = () => {
+    if (!usernameInput.trim()) return
+    const code = generateRoomCode()
+    setGeneratedCode(code)
+    setRoomIdInput(code)
+    setLoginMode('create')
+  }
+
+  const handleCopyCode = async () => {
+    await navigator.clipboard.writeText(generatedCode)
+    setCodeCopied(true)
+    setTimeout(() => setCodeCopied(false), 2000)
+  }
+
   if (!joined) {
-    return (
-      <div className="login-container">
-        <div className="login-box">
-          <h1 className="login-title">🎬 Watch Party</h1>
-          <p className="login-subtitle">Sevgilinle Birlikte Film İzle</p>
-          <form onSubmit={handleJoinRoom}>
+    // Step 0: Choose mode
+    if (loginMode === null) {
+      return (
+        <div className="login-container">
+          <div className="login-box">
+            <h1 className="login-title">🎬 Watch Party</h1>
+            <p className="login-subtitle">Sevgilinle Birlikte Film İzle</p>
             <div className="form-group">
-              <label>Kullanıcı Adı</label>
+              <label>Kullanıcı Adın</label>
               <input
                 type="text"
                 placeholder="Adını gir..."
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
-                required
+                onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
+                autoFocus
               />
             </div>
-            <div className="form-group">
-              <label>Oda ID'si</label>
-              <input
-                type="text"
-                placeholder="Oda ID'sini gir veya oluştur..."
-                value={roomIdInput}
-                onChange={(e) => setRoomIdInput(e.target.value)}
-                required
-              />
+            <div className="mode-buttons">
+              <button
+                type="button"
+                className="btn btn-primary mode-btn"
+                onClick={handleCreateRoom}
+                disabled={!usernameInput.trim()}
+              >
+                🏠 Oda Oluştur
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline mode-btn"
+                onClick={() => setLoginMode('join')}
+                disabled={!usernameInput.trim()}
+              >
+                🔗 Odaya Katıl
+              </button>
             </div>
-            <button type="submit" className="btn btn-primary">
-              Odaya Katıl
-            </button>
-          </form>
-          <p className="login-tip">💡 Aynı Oda ID'si ile partner'ın da bağlan</p>
-          {mediaWarning && <p className="login-tip" style={{ color: '#f87171' }}>{mediaWarning}</p>}
+            {!usernameInput.trim() && <p className="login-tip">Devam etmek için adını gir 👆</p>}
+            {mediaWarning && <p className="login-tip" style={{ color: '#f87171' }}>{mediaWarning}</p>}
+          </div>
         </div>
-      </div>
-    )
+      )
+    }
+
+    // Step 1a: Created room – show code
+    if (loginMode === 'create') {
+      return (
+        <div className="login-container">
+          <div className="login-box">
+            <h1 className="login-title">🎬 Watch Party</h1>
+            <p className="login-subtitle">Oda hazır! Kodu partnerinle paylaş</p>
+
+            <div className="room-code-display">
+              <span className="room-code-value">{generatedCode}</span>
+              <button type="button" className="copy-btn" onClick={handleCopyCode}>
+                {codeCopied ? '✅ Kopyalandı!' : '📋 Kopyala'}
+              </button>
+            </div>
+
+            <p className="login-tip" style={{ textAlign: 'center', marginBottom: 16 }}>
+              Partner bu kodu girerek sana katılacak
+            </p>
+
+            <form onSubmit={handleJoinRoom}>
+              <input type="hidden" value={generatedCode} />
+              <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>
+                🚀 Odaya Gir
+              </button>
+            </form>
+            <button type="button" className="btn btn-ghost" style={{ width: '100%', marginTop: 8 }}
+              onClick={() => { setLoginMode(null); setGeneratedCode(''); setRoomIdInput('') }}
+            >
+              ← Geri
+            </button>
+            {mediaWarning && <p className="login-tip" style={{ color: '#f87171' }}>{mediaWarning}</p>}
+          </div>
+        </div>
+      )
+    }
+
+    // Step 1b: Join room – enter code
+    if (loginMode === 'join') {
+      return (
+        <div className="login-container">
+          <div className="login-box">
+            <h1 className="login-title">🎬 Watch Party</h1>
+            <p className="login-subtitle">Partnerin verdiği kodu gir</p>
+            <form onSubmit={handleJoinRoom}>
+              <div className="form-group">
+                <label>Oda Kodu</label>
+                <input
+                  type="text"
+                  placeholder="6 haneli kodu gir (örn. ABC123)"
+                  value={roomIdInput}
+                  onChange={(e) => setRoomIdInput(e.target.value.toUpperCase())}
+                  maxLength={6}
+                  required
+                  autoFocus
+                  style={{ textAlign: 'center', fontSize: '1.5em', letterSpacing: 6 }}
+                />
+              </div>
+              <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>
+                🚀 Odaya Katıl
+              </button>
+            </form>
+            <button type="button" className="btn btn-ghost" style={{ width: '100%', marginTop: 8 }}
+              onClick={() => { setLoginMode(null); setRoomIdInput('') }}
+            >
+              ← Geri
+            </button>
+            {mediaWarning && <p className="login-tip" style={{ color: '#f87171' }}>{mediaWarning}</p>}
+          </div>
+        </div>
+      )
+    }
   }
 
   return (
