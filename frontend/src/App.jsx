@@ -105,55 +105,68 @@ function App() {
     return stream
   }, [cameraEnabled, micEnabled, syncLocalVideo])
 
-  const updateSenders = useCallback(async (peerId) => {
-    const senders = videoSendersRef.current[peerId]
-    if (!senders) return
-
-    const promises = []
-
-    const audioTrack = localStreamRef.current?.getAudioTracks()[0] || null
-    if (senders.audio.track !== audioTrack) promises.push(senders.audio.replaceTrack(audioTrack))
-
-    const videoTrack = localStreamRef.current?.getVideoTracks()[0] || null
-    if (senders.video.track !== videoTrack) promises.push(senders.video.replaceTrack(videoTrack))
-
-    const screenTrack = screenStreamRef.current?.getVideoTracks()[0] || null
-    if (senders.screen.track !== screenTrack) promises.push(senders.screen.replaceTrack(screenTrack))
-
-    const screenAudioTrack = screenStreamRef.current?.getAudioTracks()[0] || null
-    if (senders.screenAudio.track !== screenAudioTrack) promises.push(senders.screenAudio.replaceTrack(screenAudioTrack))
-
-    await Promise.all(promises)
-  }, [])
+  // --- Her peer için track sender haritası ---
+  // videoSendersRef[peerId] = { audio, video, screen, screenAudio } (RTCRtpSender)
 
   const flushPendingIce = useCallback(async (peerId) => {
     const pc = peerConnectionsRef.current[peerId]
     const queue = pendingIceRef.current[peerId]
     if (!pc || !queue || queue.length === 0) return
-
-    for (const candidate of queue) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate))
-      } catch (err) {
-        console.error('Pending ICE add error:', err)
-      }
+    for (const c of queue) {
+      try { await pc.addIceCandidate(new RTCIceCandidate(c)) } catch (_) {}
     }
     pendingIceRef.current[peerId] = []
   }, [])
 
+  // Yeni offer oluşturup gönder (renegotiation)
+  const renegotiate = useCallback(async (peerId) => {
+    const pc = peerConnectionsRef.current[peerId]
+    if (!pc) return
+    try {
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      socketRef.current?.emit('offer', { roomId, to: peerId, offer })
+    } catch (err) { console.error('renegotiate error', err) }
+  }, [roomId])
+
   const renegotiateForAllPeers = useCallback(async () => {
-    for (const peerId of Object.keys(peerConnectionsRef.current)) {
-      const pc = peerConnectionsRef.current[peerId]
-      if (!pc) continue
-      try {
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        socketRef.current?.emit('offer', { roomId, to: peerId, offer })
-      } catch (err) {
-        console.error('Renegotiation failed:', err)
+    await Promise.all(Object.keys(peerConnectionsRef.current).map(renegotiate))
+  }, [renegotiate])
+
+  // Belirli bir peer'a tüm local track'leri (kamera+ekran) ekle/güncelle
+  const syncSendersForPeer = useCallback(async (peerId) => {
+    const pc = peerConnectionsRef.current[peerId]
+    if (!pc) return
+
+    if (!videoSendersRef.current[peerId]) {
+      videoSendersRef.current[peerId] = {}
+    }
+    const senders = videoSendersRef.current[peerId]
+
+    const audioTrack = localStreamRef.current?.getAudioTracks()[0] ?? null
+    const videoTrack = localStreamRef.current?.getVideoTracks()[0] ?? null
+    const screenVideoTrack = screenStreamRef.current?.getVideoTracks()[0] ?? null
+    const screenAudioTrack = screenStreamRef.current?.getAudioTracks()[0] ?? null
+
+    const tryReplace = async (key, track) => {
+      if (senders[key]) {
+        if (senders[key].track !== track) await senders[key].replaceTrack(track)
+      } else if (track) {
+        senders[key] = pc.addTrack(track, track.kind === 'audio'
+          ? (localStreamRef.current || new MediaStream())
+          : (screenVideoTrack === track ? (screenStreamRef.current || new MediaStream()) : (localStreamRef.current || new MediaStream())))
       }
     }
-  }, [roomId])
+
+    await tryReplace('audio', audioTrack)
+    await tryReplace('video', videoTrack)
+    await tryReplace('screen', screenVideoTrack)
+    await tryReplace('screenAudio', screenAudioTrack)
+  }, [])
+
+  const updateSenders = useCallback(async (peerId) => {
+    await syncSendersForPeer(peerId)
+  }, [syncSendersForPeer])
 
   const createPeerConnection = useCallback(
     async (peerId, initiator = false) => {
@@ -161,65 +174,61 @@ function App() {
 
       const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS })
       peerConnectionsRef.current[peerId] = pc
-
-      if (initiator) {
-        pc.addTransceiver('audio', { direction: 'sendrecv' })
-        pc.addTransceiver('video', { direction: 'sendrecv' })
-        pc.addTransceiver('video', { direction: 'sendrecv' })
-        pc.addTransceiver('audio', { direction: 'sendrecv' })
-      }
+      pendingIceRef.current[peerId] = []
 
       pc.ontrack = (event) => {
-        const transceivers = pc.getTransceivers()
-        const isScreenVideo = event.transceiver === transceivers[2]
-        const isScreenAudio = event.transceiver === transceivers[3]
+        const { track, streams } = event
+        // Ekran paylaşımı: content-hint veya stream label ile ayırt et
+        const isScreen = track.contentHint === 'detail' ||
+          (streams[0] && streams[0].id && screenStreamRef.current &&
+           streams[0].id === screenStreamRef.current.id)
 
-        if (isScreenVideo || isScreenAudio) {
-          if (!remoteScreenStreamRef.current.getTracks().some((t) => t.id === event.track.id)) {
-            remoteScreenStreamRef.current.addTrack(event.track)
+        // Basit yaklaşım: 3. ve 4. gelen track ekran sayılır
+        const remoteTrackCount = remoteStreamRef.current.getTracks().length
+
+        if (track.kind === 'video') {
+          // İlk video track → kamera, ikinci → ekran
+          const existingVideoTracks = remoteStreamRef.current.getVideoTracks()
+          if (existingVideoTracks.length === 0) {
+            // Kamera
+            remoteStreamRef.current.addTrack(track)
+            setRemoteHasVideo(true)
+            syncRemoteVideo()
+          } else {
+            // Ekran
+            remoteScreenStreamRef.current = new MediaStream()
+            remoteScreenStreamRef.current.addTrack(track)
+            setRemoteScreenActive(true)
+            setMainView('screen')
             syncScreenVideo(remoteScreenStreamRef.current)
           }
-        } else {
-          if (!remoteStreamRef.current.getTracks().some((t) => t.id === event.track.id)) {
-            remoteStreamRef.current.addTrack(event.track)
+        } else if (track.kind === 'audio') {
+          // Ses track'i — kameraya ekle
+          if (!remoteStreamRef.current.getAudioTracks().length) {
+            remoteStreamRef.current.addTrack(track)
+            syncRemoteVideo()
+          } else {
+            remoteScreenStreamRef.current.addTrack(track)
           }
-          if (event.track.kind === 'video') {
-            setRemoteHasVideo(true)
-          }
-          syncRemoteVideo()
         }
       }
 
       pc.onicecandidate = (event) => {
         if (!event.candidate || !socketRef.current) return
-        socketRef.current.emit('ice-candidate', {
-          roomId,
-          to: peerId,
-          candidate: event.candidate
-        })
+        socketRef.current.emit('ice-candidate', { roomId, to: peerId, candidate: event.candidate })
       }
 
       pc.onconnectionstatechange = () => {
-        const state = pc.connectionState
-        if (state === 'failed' || state === 'closed' || state === 'disconnected') {
-          if (peerConnectionsRef.current[peerId]) {
-            peerConnectionsRef.current[peerId].close()
-            delete peerConnectionsRef.current[peerId]
-            delete videoSendersRef.current[peerId]
-          }
+        if (['failed','closed','disconnected'].includes(pc.connectionState)) {
+          delete peerConnectionsRef.current[peerId]
+          delete videoSendersRef.current[peerId]
         }
       }
 
-      if (initiator) {
-        const transceivers = pc.getTransceivers()
-        videoSendersRef.current[peerId] = {
-          audio: transceivers[0].sender,
-          video: transceivers[1].sender,
-          screen: transceivers[2].sender,
-          screenAudio: transceivers[3].sender
-        }
-        await updateSenders(peerId)
+      // Her iki taraf da kendi track'lerini ekler
+      await syncSendersForPeer(peerId)
 
+      if (initiator) {
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         socketRef.current?.emit('offer', { roomId, to: peerId, offer })
@@ -227,22 +236,19 @@ function App() {
 
       return pc
     },
-    [STUN_SERVERS, roomId, syncRemoteVideo, updateSenders]
+    [STUN_SERVERS, roomId, syncRemoteVideo, syncSendersForPeer, syncScreenVideo]
   )
 
   const handleIncomingOffer = useCallback(
     async ({ from, offer }) => {
-      const pc = await createPeerConnection(from, false)
+      let pc = peerConnectionsRef.current[from]
+      if (!pc) pc = await createPeerConnection(from, false)
+
+      // Önce remote description'ı set et
       await pc.setRemoteDescription(new RTCSessionDescription(offer))
-      
-      const transceivers = pc.getTransceivers()
-      videoSendersRef.current[from] = {
-        audio: transceivers[0].sender,
-        video: transceivers[1].sender,
-        screen: transceivers[2].sender,
-        screenAudio: transceivers[3].sender
-      }
-      await updateSenders(from)
+
+      // Sonra local track'leri ekle (answer'a dahil olur)
+      if (pc._addLocalTracks) await pc._addLocalTracks()
 
       await flushPendingIce(from)
 
@@ -250,7 +256,7 @@ function App() {
       await pc.setLocalDescription(answer)
       socketRef.current?.emit('answer', { roomId, to: from, answer })
     },
-    [createPeerConnection, flushPendingIce, roomId, updateSenders]
+    [createPeerConnection, flushPendingIce, roomId]
   )
 
   const handleIncomingAnswer = useCallback(async ({ from, answer }) => {
@@ -460,42 +466,48 @@ function App() {
   const stopScreenShare = useCallback(async () => {
     const currentScreen = screenStreamRef.current
     if (!currentScreen) return
-
     currentScreen.getTracks().forEach((t) => t.stop())
     screenStreamRef.current = null
     setScreenSharing(false)
     setMainView('partner')
-
-    await Promise.all(Object.keys(peerConnectionsRef.current).map((peerId) => updateSenders(peerId)))
-    await renegotiateForAllPeers()
-
+    syncScreenVideo(null)
+    for (const peerId of Object.keys(peerConnectionsRef.current)) {
+      const s = videoSendersRef.current[peerId]
+      if (!s) continue
+      if (s.screen) try { await s.screen.replaceTrack(null) } catch (_) {}
+      if (s.screenAudio) try { await s.screenAudio.replaceTrack(null) } catch (_) {}
+    }
     socketRef.current?.emit('screen-share-stop', { roomId })
-  }, [roomId, updateSenders, renegotiateForAllPeers])
+  }, [roomId, syncScreenVideo])
 
   const toggleScreenShare = async () => {
     try {
-      if (screenSharing) {
-        await stopScreenShare()
-        return
-      }
-
-      const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true
-      })
-
+      if (screenSharing) { await stopScreenShare(); return }
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
       screenStreamRef.current = displayStream
       setScreenSharing(true)
       setMainView('screen')
-
-      const screenTrack = displayStream.getVideoTracks()[0]
-      screenTrack.onended = async () => {
-        await stopScreenShare()
+      syncScreenVideo(displayStream)
+      displayStream.getVideoTracks()[0].onended = () => stopScreenShare()
+      // Her peer için ekran track'i ekle → onnegotiationneeded otomatik tetiklenir
+      for (const peerId of Object.keys(peerConnectionsRef.current)) {
+        const pc = peerConnectionsRef.current[peerId]
+        const s = videoSendersRef.current[peerId]
+        if (!s) continue
+        const sv = displayStream.getVideoTracks()[0]
+        const sa = displayStream.getAudioTracks()[0] || null
+        if (s.screen) {
+          await s.screen.replaceTrack(sv)
+        } else {
+          s.screen = pc.addTrack(sv, displayStream)
+        }
+        if (sa) {
+          if (s.screenAudio) await s.screenAudio.replaceTrack(sa)
+          else s.screenAudio = pc.addTrack(sa, displayStream)
+        }
+        // Renegotiate (onnegotiationneeded olmayan taraf için manuel)
+        await renegotiate(peerId)
       }
-
-      await Promise.all(Object.keys(peerConnectionsRef.current).map((peerId) => updateSenders(peerId)))
-      await renegotiateForAllPeers()
-
       socketRef.current?.emit('screen-share-start', { roomId })
     } catch (err) {
       console.error('Screen share error:', err)
