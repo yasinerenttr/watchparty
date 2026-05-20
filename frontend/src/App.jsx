@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import io from 'socket.io-client'
 import './App.css'
 
-const SOCKET_URL = window.location.hostname === 'localhost' ? 'http://localhost:3001' : `http://${window.location.hostname}:3001`
+const SOCKET_URL = 'https://watchparty-mywf.onrender.com'
 
 function App() {
   const [joined, setJoined] = useState(false)
@@ -392,7 +392,7 @@ function App() {
       }, 0)
     } catch (err) {
       console.error(err)
-      alert('Bağlantı başlatılamadı. Backend çalışıyor mu kontrol et (localhost:3001).')
+      alert('Bağlantı başlatılamadı. Sunucuya ulaşılamıyor, biraz bekleyip tekrar dene.')
     }
   }
 
