@@ -8,7 +8,7 @@ body {
   background: #0a0e27;
   color: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
-  overflow: hidden;
+  overflow: auto;
 }
 
 /* ===== LOGIN PAGE ===== */
@@ -268,16 +268,18 @@ body {
 /* ===== WATCH PARTY PAGE ===== */
 #root {
   width: 100%;
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .watch-party-container {
   width: 100%;
   height: 100vh;
+  height: 100dvh;
   background: #0a0e27;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .watch-party-header {
@@ -319,17 +321,41 @@ body {
   display: flex;
   position: relative;
   overflow: hidden;
+  height: 100%;
 }
 
-/* Screen Container - Large Main Video */
+/* Screen Container - Zoom-like layout */
 .screen-container {
   flex: 1;
   background: #000000;
   position: relative;
   display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.main-video-area {
+  flex: 1;
+  position: relative;
+  display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  min-height: 0;
+}
+
+.media-warning-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  background: rgba(127, 29, 29, 0.9);
+  border: 1px solid rgba(248, 113, 113, 0.7);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #fecaca;
+  font-size: 13px;
 }
 
 .video-wrapper {
@@ -337,6 +363,7 @@ body {
   height: 100%;
   position: relative;
   background: #000000;
+  cursor: pointer;
 }
 
 .video-wrapper video {
@@ -359,6 +386,24 @@ body {
   border-left: 3px solid #dc2626;
 }
 
+.fullscreen-hint {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #94a3b8;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 0.75em;
+  pointer-events: none;
+  animation: fadeInOut 2s ease-in-out infinite;
+}
+
+@keyframes fadeInOut {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
 .empty-state {
   display: flex;
   align-items: center;
@@ -369,37 +414,126 @@ body {
   color: #a0aec0;
 }
 
-/* Local Cameras - Bottom Right */
-.local-cameras {
-  position: absolute;
-  bottom: 20px;
-  right: 20px;
+/* Filmstrip - Alt kamera şeridi (Zoom tarzı) */
+.filmstrip {
+  flex-shrink: 0;
   display: flex;
-  gap: 12px;
-  flex-direction: column;
-  z-index: 50;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(10, 14, 39, 0.95);
+  border-top: 1px solid rgba(220, 38, 38, 0.2);
+  overflow-x: auto;
+  justify-content: center;
+  align-items: center;
+  min-height: 90px;
+}
+
+.filmstrip-item {
+  flex-shrink: 0;
+  width: 120px;
+  height: 72px;
+  background: #1a1f3a;
+  border: 2px solid rgba(220, 38, 38, 0.4);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  padding: 0;
+}
+
+.filmstrip-item:hover {
+  border-color: #ef4444;
+  box-shadow: 0 4px 20px rgba(220, 38, 38, 0.4);
+  transform: scale(1.08);
+}
+
+.filmstrip-admin {
+  border-color: #fbbf24;
+  box-shadow: 0 2px 12px rgba(251, 191, 36, 0.3);
+}
+
+.filmstrip-admin:hover {
+  border-color: #fbbf24;
+  box-shadow: 0 4px 20px rgba(251, 191, 36, 0.5);
+}
+
+.filmstrip-screen {
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.filmstrip-screen:hover {
+  border-color: #818cf8;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+}
+
+.filmstrip-active {
+  border-color: #f472b6 !important;
+  box-shadow: 0 0 20px rgba(244, 114, 182, 0.6) !important;
+  transform: scale(1.08);
+}
+
+.filmstrip-item video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.filmstrip-label {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  background: rgba(0, 0, 0, 0.75);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.65em;
+  color: #e2e8f0;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* local-cameras (mini kamera şeridi) */
+.local-cameras {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(10, 14, 39, 0.95);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.2);
+  overflow-x: auto;
+  justify-content: center;
+  align-items: center;
+  min-height: 82px;
+  order: -1; /* Moves it to the top of screen-container */
 }
 
 .camera-box {
-  width: 150px;
-  height: 150px;
+  flex-shrink: 0;
+  width: 120px;
+  height: 72px;
   background: #1a1f3a;
-  border: 2px solid #dc2626;
-  border-radius: 12px;
+  border: 2px solid rgba(220, 38, 38, 0.4);
+  border-radius: 8px;
   overflow: hidden;
   position: relative;
-  box-shadow: 0 8px 32px rgba(220, 38, 38, 0.3);
-  transition: all 0.3s ease;
+  transition: all 0.25s ease;
 }
 
-.switchable-mini {
-  padding: 0;
+.camera-box.switchable-mini {
   cursor: pointer;
+  padding: 0;
 }
 
-.camera-box:hover {
-  box-shadow: 0 12px 48px rgba(220, 38, 38, 0.5);
-  transform: scale(1.05);
+.camera-box.switchable-mini:hover {
+  border-color: #ef4444;
+  box-shadow: 0 4px 20px rgba(220, 38, 38, 0.4);
+  transform: scale(1.08);
+}
+
+.camera-box.active-mini {
+  border-color: #f472b6 !important;
+  box-shadow: 0 0 20px rgba(244, 114, 182, 0.6) !important;
+  transform: scale(1.08);
 }
 
 .camera-box video {
@@ -408,46 +542,46 @@ body {
   object-fit: cover;
 }
 
-.local-camera {
-  border-color: #ef4444;
-  box-shadow: 0 8px 32px rgba(239, 68, 68, 0.3);
-}
-
-.local-camera:hover {
-  box-shadow: 0 12px 48px rgba(239, 68, 68, 0.5);
-}
-
 .camera-label {
   position: absolute;
-  bottom: 8px;
-  left: 8px;
-  background: rgba(0, 0, 0, 0.8);
-  padding: 4px 12px;
+  bottom: 4px;
+  left: 4px;
+  background: rgba(0, 0, 0, 0.75);
+  padding: 2px 8px;
   border-radius: 4px;
-  font-size: 0.75em;
-  color: #ef4444;
+  font-size: 0.65em;
+  color: #e2e8f0;
   font-weight: 600;
+  white-space: nowrap;
 }
 
-/* Controls */
-.controls {
-  position: absolute;
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
+.local-camera {
+  cursor: default;
+}
+
+/* Controls Bar - Video alanının dışında */
+.controls-bar {
+  flex-shrink: 0;
   display: flex;
   gap: 16px;
-  z-index: 50;
+  justify-content: center;
+  align-items: center;
+  padding: 10px 20px;
+  background: rgba(15, 23, 42, 0.95);
+  border-top: 1px solid rgba(220, 38, 38, 0.15);
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
 }
 
 .control-btn {
-  width: 60px;
-  height: 60px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
   background: rgba(30, 41, 59, 0.9);
   border: 2px solid rgba(220, 38, 38, 0.3);
   color: white;
-  font-size: 1.8em;
+  font-size: 1.6em;
   cursor: pointer;
   transition: all 0.3s ease;
   display: flex;
@@ -514,6 +648,15 @@ body {
   box-shadow: 0 4px 12px rgba(220, 38, 38, 0.2);
 }
 
+.user-admin {
+  border-left: 3px solid #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.user-admin:hover {
+  background: rgba(251, 191, 36, 0.15);
+}
+
 .user-name {
   font-weight: 600;
   color: #ffffff;
@@ -531,8 +674,8 @@ body {
   padding-top: 16px;
   display: flex;
   flex-direction: column;
-  min-height: 0;
   flex: 1;
+  overflow: hidden;
 }
 
 .chat-messages {
@@ -729,14 +872,18 @@ body {
     width: 260px;
   }
 
-  .camera-box {
-    width: 110px;
-    height: 110px;
+  .filmstrip-item {
+    width: 100px;
+    height: 60px;
+  }
+
+  .filmstrip {
+    min-height: 76px;
   }
 
   .control-btn {
-    width: 52px;
-    height: 52px;
+    width: 48px;
+    height: 48px;
     font-size: 1.4em;
   }
 }
@@ -744,12 +891,10 @@ body {
 /* ===== RESPONSIVE — MOBILE (≤768px) ===== */
 @media (max-width: 768px) {
 
-  /* Body */
   body {
-    overflow: hidden;
+    overflow: auto;
   }
 
-  /* Header */
   .watch-party-header {
     padding: 10px 14px;
   }
@@ -767,19 +912,48 @@ body {
     font-size: 0.8em;
   }
 
-  /* Main layout — stack video on top, sidebar on bottom */
   .watch-party-main {
     flex-direction: column;
     overflow: hidden;
   }
 
-  /* Screen takes ~60% of height */
   .screen-container {
-    flex: 0 0 58vh;
+    flex: 0 0 auto;
     min-height: 0;
   }
 
-  /* Side panel scrolls below */
+  .main-video-area {
+    height: 40vh;
+  }
+
+  .filmstrip {
+    min-height: 64px;
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .filmstrip-item {
+    width: 80px;
+    height: 50px;
+    border-radius: 6px;
+  }
+
+  .filmstrip-label {
+    font-size: 0.55em;
+    padding: 1px 5px;
+  }
+
+  .controls-bar {
+    padding: 8px 12px;
+    gap: 12px;
+  }
+
+  .control-btn {
+    width: 44px;
+    height: 44px;
+    font-size: 1.2em;
+  }
+
   .users-panel {
     width: 100%;
     flex: 1;
@@ -806,37 +980,6 @@ body {
     padding: 8px 10px;
   }
 
-  /* Floating cameras — smaller, stacked vertically */
-  .local-cameras {
-    bottom: 10px;
-    right: 8px;
-    gap: 6px;
-  }
-
-  .camera-box {
-    width: 80px;
-    height: 80px;
-    border-radius: 8px;
-  }
-
-  .camera-label {
-    font-size: 0.65em;
-    padding: 2px 6px;
-  }
-
-  /* Controls — spread across bottom */
-  .controls {
-    gap: 10px;
-    bottom: 10px;
-  }
-
-  .control-btn {
-    width: 48px;
-    height: 48px;
-    font-size: 1.3em;
-  }
-
-  /* Chat */
   .chat-section {
     margin-top: 8px;
     padding-top: 8px;
@@ -857,7 +1000,6 @@ body {
     font-size: 0.85em;
   }
 
-  /* Reaction buttons */
   .reaction-buttons {
     gap: 6px;
   }
@@ -867,7 +1009,6 @@ body {
     font-size: 0.82em;
   }
 
-  /* Login page */
   .login-box {
     padding: 36px 22px;
     max-width: 360px;
@@ -907,23 +1048,29 @@ body {
     font-size: 1em;
   }
 
-  .screen-container {
-    flex: 0 0 52vh;
+  .main-video-area {
+    height: 35vh;
   }
 
-  .camera-box {
+  .filmstrip {
+    min-height: 56px;
+    padding: 4px 6px;
+  }
+
+  .filmstrip-item {
     width: 70px;
-    height: 70px;
+    height: 44px;
   }
 
   .control-btn {
-    width: 44px;
-    height: 44px;
-    font-size: 1.2em;
+    width: 40px;
+    height: 40px;
+    font-size: 1.1em;
   }
 
-  .controls {
-    gap: 8px;
+  .controls-bar {
+    padding: 6px 10px;
+    gap: 10px;
   }
 
   .users-panel {

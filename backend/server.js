@@ -29,6 +29,7 @@ io.on("connection", (socket) => {
       rooms.set(roomId, {
         users: [],
         screenSharing: null,
+        adminId: socket.id, // İlk giren admin olur
       });
     }
 
@@ -40,13 +41,16 @@ io.on("connection", (socket) => {
     
     // Yeni kullanıcıya odadaki diğer kullanıcıları gönder
     socket.emit("room-users", room.users);
+
+    // Admin bilgisini gönder
+    io.to(roomId).emit("room-info", { adminId: room.adminId });
     
     // Eğer odada ekran paylaşan biri varsa, yeni kullanıcıya bildir
     if (room.screenSharing) {
       socket.emit("screen-share-started", { userId: room.screenSharing });
     }
     
-    console.log(`${username} joined room ${roomId}`);
+    console.log(`${username} joined room ${roomId} (admin: ${room.adminId})`);
   });
 
   socket.on("offer", ({ roomId, offer, to }) => {
@@ -108,12 +112,28 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     // Tüm odalarda bu kullanıcıyı sil
     rooms.forEach((room, roomId) => {
+      const wasInRoom = room.users.some(u => u.id === socket.id);
       room.users = room.users.filter(u => u.id !== socket.id);
+      
       if (room.screenSharing === socket.id) {
         room.screenSharing = null;
         io.to(roomId).emit("screen-share-stopped", { userId: socket.id });
       }
+
+      // Admin ayrıldıysa yeni admin ata
+      if (wasInRoom && room.adminId === socket.id) {
+        if (room.users.length > 0) {
+          room.adminId = room.users[0].id;
+          io.to(roomId).emit("admin-changed", { adminId: room.adminId });
+        }
+      }
+
       io.to(roomId).emit("user-left", { userId: socket.id });
+
+      // Oda boşsa sil
+      if (room.users.length === 0) {
+        rooms.delete(roomId);
+      }
     });
     console.log("Birisi ayrıldı:", socket.id);
   });

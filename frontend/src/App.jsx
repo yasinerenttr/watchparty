@@ -26,6 +26,11 @@ function App() {
   const [mediaWarning, setMediaWarning] = useState('')
   const [mainView, setMainView] = useState('partner')
   const [remoteHasVideo, setRemoteHasVideo] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [adminId, setAdminId] = useState(null)
+  // Per-peer: { peerId: { hasCamera, hasScreen } }
+  const [remotePeers, setRemotePeers] = useState({})
+  const [focusedPeer, setFocusedPeer] = useState(null)
 
   const localVideoRef = useRef(null)
   const remoteVideoRef = useRef(null)
@@ -41,6 +46,11 @@ function App() {
   const screenStreamRef = useRef(null)
   const videoSendersRef = useRef({})
   const pendingIceRef = useRef({})
+  // per-peer maps
+  const remoteStreamsRef = useRef({})       // peerId -> camera stream
+  const remoteScreenStreamsRef = useRef({}) // peerId -> screen stream
+  const remoteVideoRefsRef = useRef({})     // peerId -> video element
+  const peerStreamCountRef = useRef({})     // peerId -> Set(stream ids)
 
   const STUN_SERVERS = useMemo(
     () => [
@@ -118,7 +128,6 @@ function App() {
     pendingIceRef.current[peerId] = []
   }, [])
 
-  // Yeni offer oluşturup gönder (renegotiation)
   const renegotiate = useCallback(async (peerId) => {
     const pc = peerConnectionsRef.current[peerId]
     if (!pc) return
@@ -133,7 +142,6 @@ function App() {
     await Promise.all(Object.keys(peerConnectionsRef.current).map(renegotiate))
   }, [renegotiate])
 
-  // Belirli bir peer'a tüm local track'leri (kamera+ekran) ekle/güncelle
   const syncSendersForPeer = useCallback(async (peerId) => {
     const pc = peerConnectionsRef.current[peerId]
     if (!pc) return
@@ -148,28 +156,52 @@ function App() {
     const screenVideoTrack = screenStreamRef.current?.getVideoTracks()[0] ?? null
     const screenAudioTrack = screenStreamRef.current?.getAudioTracks()[0] ?? null
 
-    const tryReplace = async (key, track) => {
+    const camStream = localStreamRef.current || new MediaStream()
+    const scrStream = screenStreamRef.current || new MediaStream()
+
+    const updateTrack = async (key, track, stream) => {
       if (senders[key]) {
-        if (senders[key].track !== track) await senders[key].replaceTrack(track)
+        if (track) {
+          if (senders[key].track !== track) {
+            try { await senders[key].replaceTrack(track) } catch (err) { console.error('replaceTrack error', err) }
+          }
+        } else {
+          try { pc.removeTrack(senders[key]) } catch (err) { console.error('removeTrack error', err) }
+          delete senders[key]
+        }
       } else if (track) {
-        senders[key] = pc.addTrack(track, track.kind === 'audio'
-          ? (localStreamRef.current || new MediaStream())
-          : (screenVideoTrack === track ? (screenStreamRef.current || new MediaStream()) : (localStreamRef.current || new MediaStream())))
+        try {
+          senders[key] = pc.addTrack(track, stream)
+        } catch (err) {
+          console.error('addTrack error', err)
+        }
       }
     }
 
-    await tryReplace('audio', audioTrack)
-    await tryReplace('video', videoTrack)
-    await tryReplace('screen', screenVideoTrack)
-    await tryReplace('screenAudio', screenAudioTrack)
+    await updateTrack('audio', audioTrack, camStream)
+    await updateTrack('video', videoTrack, camStream)
+    await updateTrack('screen', screenVideoTrack, scrStream)
+    await updateTrack('screenAudio', screenAudioTrack, scrStream)
   }, [])
 
   const updateSenders = useCallback(async (peerId) => {
     await syncSendersForPeer(peerId)
-  }, [syncSendersForPeer])
+    await renegotiate(peerId)
+  }, [syncSendersForPeer, renegotiate])
 
-  const createPeerConnection = useCallback(
-    async (peerId, initiator = false) => {
+  const refreshRemoteFlags = useCallback(() => {
+    const peers = remotePeers
+    const anyCamera = Object.values(peers).some((p) => !!p?.hasCamera)
+    const anyScreen = Object.values(peers).some((p) => !!p?.hasScreen)
+    setRemoteHasVideo(anyCamera)
+    setRemoteScreenActive(anyScreen)
+    if (!screenSharing && !anyScreen && mainView === 'screen') {
+      setMainView('partner')
+      syncScreenVideo(null)
+    }
+  }, [mainView, remotePeers, screenSharing, syncScreenVideo])
+
+  const createPeerConnection = useCallback(async (peerId, initiator = false) => {
       if (peerConnectionsRef.current[peerId]) return peerConnectionsRef.current[peerId]
 
       const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS })
@@ -178,38 +210,58 @@ function App() {
 
       pc.ontrack = (event) => {
         const { track, streams } = event
-        // Ekran paylaşımı: content-hint veya stream label ile ayırt et
-        const isScreen = track.contentHint === 'detail' ||
-          (streams[0] && streams[0].id && screenStreamRef.current &&
-           streams[0].id === screenStreamRef.current.id)
+        const stream = streams[0]
+        if (!stream) return
 
-        // Basit yaklaşım: 3. ve 4. gelen track ekran sayılır
-        const remoteTrackCount = remoteStreamRef.current.getTracks().length
+        const label = (track.label || '').toLowerCase()
+        const hasScreenHint = label.includes('screen') || label.includes('window') || label.includes('tab') || label.includes('monitor') || label.includes('display') || label.includes('sharing')
+        
+        let isScreen = hasScreenHint
+        const knownCameraStream = remoteStreamsRef.current[peerId]
+        if (!isScreen && knownCameraStream && knownCameraStream.id !== stream.id) {
+          isScreen = true
+        }
 
-        if (track.kind === 'video') {
-          // İlk video track → kamera, ikinci → ekran
-          const existingVideoTracks = remoteStreamRef.current.getVideoTracks()
-          if (existingVideoTracks.length === 0) {
-            // Kamera
-            remoteStreamRef.current.addTrack(track)
+        if (isScreen) {
+          remoteScreenStreamsRef.current[peerId] = stream
+          remoteScreenStreamRef.current = stream
+          
+          if (track.kind === 'video') {
+            setRemotePeers(p => ({ ...p, [peerId]: { ...(p[peerId]||{}), hasScreen: true } }))
+            setRemoteScreenActive(true)
+            syncScreenVideo(stream)
+            if (!focusedPeer) setMainView('screen')
+          }
+        } else {
+          remoteStreamsRef.current[peerId] = stream
+          remoteStreamRef.current = stream
+          
+          if (track.kind === 'video') {
+            setRemotePeers(p => ({ ...p, [peerId]: { ...(p[peerId]||{}), hasCamera: true } }))
             setRemoteHasVideo(true)
             syncRemoteVideo()
-          } else {
-            // Ekran
-            remoteScreenStreamRef.current = new MediaStream()
-            remoteScreenStreamRef.current.addTrack(track)
-            setRemoteScreenActive(true)
-            setMainView('screen')
-            syncScreenVideo(remoteScreenStreamRef.current)
+            const el = remoteVideoRefsRef.current[peerId]
+            if (el) { el.srcObject = stream; el.play().catch(()=>{}) }
           }
-        } else if (track.kind === 'audio') {
-          // Ses track'i — kameraya ekle
-          if (!remoteStreamRef.current.getAudioTracks().length) {
-            remoteStreamRef.current.addTrack(track)
-            syncRemoteVideo()
-          } else {
-            remoteScreenStreamRef.current.addTrack(track)
-          }
+        }
+
+        track.onended = () => {
+          setTimeout(() => {
+            if (isScreen && track.kind === 'video') {
+              setRemotePeers(p => {
+                const next = { ...p, [peerId]: { ...(p[peerId] || {}), hasScreen: false } }
+                return next
+              })
+              if (remoteScreenStreamsRef.current[peerId]?.id === stream.id) delete remoteScreenStreamsRef.current[peerId]
+            } else if (!isScreen && track.kind === 'video') {
+              setRemotePeers(p => {
+                const next = { ...p, [peerId]: { ...(p[peerId] || {}), hasCamera: false } }
+                return next
+              })
+              if (remoteStreamsRef.current[peerId]?.id === stream.id) delete remoteStreamsRef.current[peerId]
+            }
+            refreshRemoteFlags()
+          }, 0)
         }
       }
 
@@ -236,7 +288,7 @@ function App() {
 
       return pc
     },
-    [STUN_SERVERS, roomId, syncRemoteVideo, syncSendersForPeer, syncScreenVideo]
+    [STUN_SERVERS, focusedPeer, roomId, remoteScreenActive, refreshRemoteFlags, syncRemoteVideo, syncSendersForPeer, syncScreenVideo]
   )
 
   const handleIncomingOffer = useCallback(
@@ -333,6 +385,9 @@ function App() {
           return [...prev, { id: userId, username: joinedName, camera: false, microphone: false }]
         })
         await createPeerConnection(userId, true)
+        if (screenStreamRef.current) {
+          socketRef.current?.emit('screen-share-start', { roomId })
+        }
       })
 
       socket.on('user-left', ({ userId }) => {
@@ -343,12 +398,22 @@ function App() {
           delete peerConnectionsRef.current[userId]
           delete videoSendersRef.current[userId]
           delete pendingIceRef.current[userId]
+          delete peerStreamCountRef.current[userId]
+          delete remoteStreamsRef.current[userId]
+          delete remoteScreenStreamsRef.current[userId]
+          delete remoteVideoRefsRef.current[userId]
         }
-        remoteStreamRef.current = new MediaStream()
-        remoteScreenStreamRef.current = new MediaStream()
-        syncRemoteVideo()
-        setRemoteScreenActive(false)
-        setRemoteHasVideo(false)
+        setRemotePeers(p => { const n={...p}; delete n[userId]; return n })
+        setFocusedPeer(fp => fp === userId ? null : fp)
+        // Eğer tek kişiydi temizle
+        if (Object.keys(peerConnectionsRef.current).length === 0) {
+          remoteStreamRef.current = new MediaStream()
+          remoteScreenStreamRef.current = new MediaStream()
+          syncRemoteVideo()
+          setRemoteScreenActive(false)
+          setRemoteHasVideo(false)
+        }
+        setTimeout(refreshRemoteFlags, 0)
       })
 
       socket.on('media-updated', ({ userId, camera, microphone }) => {
@@ -361,15 +426,31 @@ function App() {
       socket.on('answer', handleIncomingAnswer)
       socket.on('ice-candidate', handleIncomingIce)
 
+      socket.on('room-info', ({ adminId: aId }) => {
+        setAdminId(aId)
+        setIsAdmin(socket.id === aId)
+      })
+      socket.on('admin-changed', ({ adminId: aId }) => {
+        setAdminId(aId)
+        setIsAdmin(socket.id === aId)
+      })
+
       socket.on('screen-share-started', () => {
         setRemoteScreenActive(true)
-        setMainView('screen')
+        if (!focusedPeer) setMainView('screen')
       })
 
       socket.on('screen-share-stopped', () => {
-        setRemoteScreenActive(false)
-        syncScreenVideo(null)
-        setMainView('partner')
+        setRemotePeers((prev) => {
+          const next = { ...prev }
+          for (const pid of Object.keys(next)) {
+            next[pid] = { ...(next[pid] || {}), hasScreen: false }
+          }
+          return next
+        })
+        remoteScreenStreamsRef.current = {}
+        remoteScreenStreamRef.current = new MediaStream()
+        setTimeout(refreshRemoteFlags, 0)
       })
 
       socket.on('chat-message', ({ id, username: senderName, message, createdAt }) => {
@@ -472,13 +553,21 @@ function App() {
     setMainView('partner')
     syncScreenVideo(null)
     for (const peerId of Object.keys(peerConnectionsRef.current)) {
+      const pc = peerConnectionsRef.current[peerId]
       const s = videoSendersRef.current[peerId]
-      if (!s) continue
-      if (s.screen) try { await s.screen.replaceTrack(null) } catch (_) {}
-      if (s.screenAudio) try { await s.screenAudio.replaceTrack(null) } catch (_) {}
+      if (!s || !pc) continue
+      if (s.screen) {
+        try { pc.removeTrack(s.screen) } catch (_) {}
+        delete s.screen
+      }
+      if (s.screenAudio) {
+        try { pc.removeTrack(s.screenAudio) } catch (_) {}
+        delete s.screenAudio
+      }
+      await renegotiate(peerId)
     }
     socketRef.current?.emit('screen-share-stop', { roomId })
-  }, [roomId, syncScreenVideo])
+  }, [roomId, syncScreenVideo, renegotiate])
 
   const toggleScreenShare = async () => {
     try {
@@ -489,25 +578,12 @@ function App() {
       setMainView('screen')
       syncScreenVideo(displayStream)
       displayStream.getVideoTracks()[0].onended = () => stopScreenShare()
-      // Her peer için ekran track'i ekle → onnegotiationneeded otomatik tetiklenir
+      
       for (const peerId of Object.keys(peerConnectionsRef.current)) {
-        const pc = peerConnectionsRef.current[peerId]
-        const s = videoSendersRef.current[peerId]
-        if (!s) continue
-        const sv = displayStream.getVideoTracks()[0]
-        const sa = displayStream.getAudioTracks()[0] || null
-        if (s.screen) {
-          await s.screen.replaceTrack(sv)
-        } else {
-          s.screen = pc.addTrack(sv, displayStream)
-        }
-        if (sa) {
-          if (s.screenAudio) await s.screenAudio.replaceTrack(sa)
-          else s.screenAudio = pc.addTrack(sa, displayStream)
-        }
-        // Renegotiate (onnegotiationneeded olmayan taraf için manuel)
+        await syncSendersForPeer(peerId)
         await renegotiate(peerId)
       }
+      
       socketRef.current?.emit('screen-share-start', { roomId })
     } catch (err) {
       console.error('Screen share error:', err)
@@ -558,6 +634,10 @@ function App() {
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
     if (screenShareRef.current) screenShareRef.current.srcObject = null
     remoteStreamRef.current = new MediaStream()
+    remoteStreamsRef.current = {}
+    remoteScreenStreamsRef.current = {}
+    remoteVideoRefsRef.current = {}
+    peerStreamCountRef.current = {}
 
     socketRef.current?.disconnect()
     socketRef.current = null
@@ -573,12 +653,20 @@ function App() {
     setRemoteScreenActive(false)
     setMainView('partner')
     setRemoteHasVideo(false)
-  }, [stopScreenShare])
+    setIsAdmin(false)
+    setAdminId(null)
+    setRemotePeers({})
+    setFocusedPeer(null)
+  }, [focusedPeer, refreshRemoteFlags, stopScreenShare])
 
   useEffect(() => {
     syncLocalVideo()
     syncRemoteVideo()
   }, [syncLocalVideo, syncRemoteVideo, mainView, screenSharing, remoteScreenActive, remoteHasVideo])
+
+  useEffect(() => {
+    refreshRemoteFlags()
+  }, [remotePeers, refreshRemoteFlags])
 
   useEffect(() => {
     if (screenSharing) {
@@ -605,7 +693,16 @@ function App() {
   const hasScreenSource = screenSharing || remoteScreenActive
   const hasPartnerSource = remoteHasVideo
   const showScreenAsMain = mainView === 'screen' && hasScreenSource
-  const showPartnerAsMain = !showScreenAsMain && hasPartnerSource
+  // Admin bilgileri
+  const myId = socketRef.current?.id
+  const adminPeerId = adminId && adminId !== myId ? adminId : null
+  const adminHasCamera = adminPeerId ? !!(remotePeers[adminPeerId]?.hasCamera) : false
+  const focusedHasCamera = focusedPeer ? !!(remotePeers[focusedPeer]?.hasCamera) : false
+  const fallbackPeerId = Object.keys(remotePeers).find((pid) => !!remotePeers[pid]?.hasCamera) || null
+  const activeMainPeerId = focusedHasCamera
+    ? focusedPeer
+    : (adminHasCamera ? adminPeerId : fallbackPeerId)
+  const showPartnerAsMain = !showScreenAsMain && !!activeMainPeerId
 
   const generateRoomCode = () => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -792,87 +889,106 @@ function App() {
             </div>
           )}
           {showScreenAsMain ? (
-            <div key="main-screen" className="video-wrapper screen-share">
-              <video
-                key="video-screen"
-                ref={screenShareRef}
-                autoPlay
-                muted={screenSharing}
-                playsInline
-                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-              />
+            <div key="main-screen" className="video-wrapper screen-share"
+              onClick={async () => {
+                if (!document.fullscreenElement) {
+                  try { await document.querySelector('.screen-container')?.requestFullscreen() } catch(_){}
+                } else { try { await document.exitFullscreen() } catch(_){} }
+              }}>
+              <video key="video-screen" ref={screenShareRef} autoPlay
+                muted={screenSharing} playsInline
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
               <div className="screen-label">
-                {screenSharing ? '📺 Ekran Paylaşımın' : '📺 Partner Ekran Paylaşımı'}
+                {screenSharing ? '📺 Ekran Paylaşımın' : '📺 Ekran Paylaşımı'}
               </div>
             </div>
           ) : showPartnerAsMain ? (
-            <div key="main-partner" className="video-wrapper">
+            <div key={`main-${activeMainPeerId || 'partner'}`} className="video-wrapper"
+              onClick={async () => {
+                if (!document.fullscreenElement) {
+                  try { await document.querySelector('.video-wrapper')?.requestFullscreen() } catch(_){}
+                } else { try { await document.exitFullscreen() } catch(_){} }
+              }}
+              style={{ cursor: 'pointer' }}>
               <video
-                key="video-partner"
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                muted={false}
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              />
-              <div className="remote-label">Partner Görüntüsü</div>
+                ref={node => {
+                  const pid = activeMainPeerId
+                  if (pid) {
+                    remoteVideoRefsRef.current[pid] = node
+                    if (node && remoteStreamsRef.current[pid]) {
+                      node.srcObject = remoteStreamsRef.current[pid]
+                      node.play().catch(()=>{})
+                    }
+                  } else if (node) {
+                    // fallback eski API
+                    node.srcObject = remoteStreamRef.current
+                  }
+                }}
+                autoPlay playsInline muted={false}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <div className="remote-label">
+                {activeMainPeerId === adminPeerId ? '👑 ' : '💕 '}
+                {users.find(u => u.id === activeMainPeerId)?.username || 'Partner'}
+              </div>
+              <div style={{ position:'absolute', top:10, right:12, background:'rgba(0,0,0,0.5)', color:'#aaa', padding:'4px 10px', borderRadius:20, fontSize:'0.75em', pointerEvents:'none' }}>
+                📺 Tam ekran için tıkla
+              </div>
             </div>
           ) : (
             <div className="empty-state">
-              <p>Partner görüntüsü veya ekran paylaşımı bekleniyor...</p>
+              <p>{isAdmin ? '👑 Kameranı aç — herkes seni görecek!' : 'Admin kamerasını açsın...'}</p>
             </div>
           )}
 
           <div className="local-cameras">
-            {hasScreenSource && !showScreenAsMain && (
-              <button
-                type="button"
-                className="camera-box switchable-mini"
-                onClick={() => setMainView('screen')}
-                title="Ekranı büyüt"
-              >
-                <video
-                  ref={screenMiniRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                />
-                <div className="camera-label">Ekran</div>
-              </button>
-            )}
-
-            {hasPartnerSource && showScreenAsMain && (
-              <button
-                type="button"
-                className="camera-box switchable-mini"
-                onClick={() => setMainView('partner')}
-                title="Partneri büyüt"
-              >
-                <video
-                  ref={remoteMiniVideoRef}
-                  autoPlay
-                  muted={false}
-                  playsInline
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                />
-                <div className="camera-label">Partner</div>
-              </button>
-            )}
-
-            <div className="camera-box local-camera">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                muted
-                playsInline
-                style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }}
-              />
-              <div className="camera-label">Sen</div>
+            {/* Kendi kameran */}
+            <div className="camera-box local-camera" title="Sen">
+              <video ref={localVideoRef} autoPlay muted playsInline
+                style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+              <div className="camera-label">{isAdmin ? '👑 Sen' : 'Sen'}</div>
             </div>
+
+            {/* Ekran paylaşımı mini */}
+            {hasScreenSource && !showScreenAsMain && (
+              <button type="button" className="camera-box switchable-mini"
+                onClick={() => setMainView('screen')} title="Ekranı büyüt">
+                <video ref={screenMiniRef} autoPlay muted playsInline
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <div className="camera-label">📺 Ekran</div>
+              </button>
+            )}
+
+            {/* Her remote peer için mini video */}
+            {Object.keys(remotePeers).map(pid => {
+              if (!remotePeers[pid]?.hasCamera) return null
+              const pUser = users.find(u => u.id === pid)
+              const isAdminPeer = pid === adminPeerId
+              const isFocused = pid === activeMainPeerId && !showScreenAsMain
+              return (
+                <button key={pid} type="button"
+                  className={`camera-box switchable-mini${isFocused ? ' active-mini' : ''}`}
+                  onClick={() => {
+                    setFocusedPeer(pid)
+                    setMainView('partner')
+                  }}
+                  title={`${pUser?.username || 'Kullanıcı'} — büyüt`}>
+                  <video
+                    ref={node => {
+                      if (node && remoteStreamsRef.current[pid]) {
+                        node.srcObject = remoteStreamsRef.current[pid]
+                      }
+                    }}
+                    autoPlay playsInline muted={false}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  <div className="camera-label">
+                    {isAdminPeer ? '👑' : '💕'} {pUser?.username || 'Kullanıcı'}
+                  </div>
+                </button>
+              )
+            })}
           </div>
 
-          <div className="controls">
+          <div className="controls-bar">
             <button
               onClick={toggleCamera}
               className={`btn control-btn ${cameraEnabled ? 'active' : ''}`}
